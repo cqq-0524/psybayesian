@@ -1,255 +1,207 @@
-# 导入 pymc 模型包，和 arviz 等分析工具 
+"""lec8.py
+
+Python counterpart of the executable R chunks in lec8.qmd (the qmd is the
+source of truth for the slides). It reproduces:
+
+  1. Beta-Binomial model (prior Beta(2, 2), data N = 118, Y = 99) with PyMC
+  2. HDI / ROPE-based inference
+  3. six framings of hypothesis testing (point-null, null-region, directional)
+  4. Savage-Dickey density ratio (analytic, conjugate model)
+  5. bridge-sampling target: the marginal likelihood (computed exactly here,
+     because Python has no direct counterpart of bridgesampling::bridge_sampler)
+"""
+
+import warnings
+
+import numpy as np
+import scipy.stats as st
+import matplotlib.pyplot as plt
+import seaborn as sns
 import pymc as pm
 import arviz as az
-import scipy.stats as st
-import numpy as np
-import matplotlib.pyplot as plt
-import xarray as xr
-import pandas as pd
-import seaborn as sns
-from math import inf
 
-# 忽略不必要的警告
-import warnings
 warnings.filterwarnings("ignore")
 
-# 通过 pd.read_csv 加载数据 Kolvoort_2020_HBM_Exp1_Clean.csv
-try:
-  df_raw = pd.read_csv('data/Kolvoort_2020_HBM_Exp1_Clean.csv')
-except:
-  df_raw = pd.read_csv('data/Kolvoort_2020_HBM_Exp1_Clean.csv')
-
-# 筛选出被试"201"，匹配类型为"Matching"的数据
-df_raw["Subject"] = df_raw["Subject"].astype(str)
-df = df_raw[(df_raw["Subject"] == "201") & (df_raw["Matching"] == "Matching")]
-
-# 选择需要的两列
-df = df[["Label", "RT_sec"]]
-
-# 重新编码标签（Label）
-df["Label"] = df["Label"].map({1: 0, 2: 1, 3: 1})
-
-# 设置索引
-df["index"] = range(len(df))
-df = df.set_index("index")
-
-# #保存数据
-# df.to_csv('data/Kolvoort_2020_HBM_Exp1_Clean_201.csv', index=False)
-
-# 显示部分数据
-df.head()
-
-#模型定义
-# 设置随机种子以确保结果可复现
-np.random.seed(123)
-
-with pm.Model() as linear_model:
-
-    # 定义先验分布参数
-    beta_0 = pm.Normal("beta_0", mu=5, sigma=2)        
-    beta_1 = pm.Normal("beta_1", mu=0, sigma=1)      
-    sigma = pm.Exponential("sigma", 3)                    
-
-    # 定义自变量 x
-    x = pm.MutableData("x", df['Label'])         
-
-    # 定义 mu，将自变量与先验结合
-    mu = beta_0 + beta_1 * x
-
-    # 定义似然：预测值y符合N(mu, sigma)分布
-    likelihood = pm.Normal("y_est", mu=mu, sigma=sigma, observed=df['RT_sec']) 
-    
-#后验采样
-with linear_model:
-    trace = pm.sample(draws=5000,                   # 使用mcmc方法进行采样，draws为采样次数
-                      tune=1000,                    # tune为调整采样策略的次数，可以决定这些结果是否要被保留
-                      chains=4,                     # 链数
-                      discard_tuned_samples=True,  # tune的结果将在采样结束后被丢弃
-                      random_seed=84735)
-                      
-#MCMC诊断
-#axes = az.plot_trace(trace)
-#plt.tight_layout()
-#plt.show()
-
-#Arviz实现贝叶斯因子计算
-# 进行贝叶斯因子计算，需要采样先验分布
-with linear_model:
-    trace.extend(pm.sample_prior_predictive(5000, random_seed=84735) )
-
-# 绘制贝叶斯因子图
-#az.plot_bf(trace, var_name="beta_1", ref_val=0)
-
-# 设置 x 轴的范围
-#plt.xlim(-0.5, 0.5) 
-
-# 去除上框线和右框线
-#sns.despine()
+sns.set_theme(style="white", context="paper")
+plt.rcParams.update({
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": False,
+    "figure.dpi": 120,
+})
 
 
-# 定义零假设模型（仅包含截距的模型）
-with pm.Model() as model_H0:
-
-    beta_0 = pm.Normal("beta_0", mu=5, sigma=2)        
-    sigma = pm.Exponential("sigma", 3)                    
-    mu = beta_0
-    likelihood = pm.Normal("y_est", mu=mu, sigma=sigma, observed=df['RT_sec'])  
-    trace_H0 = pm.sample(draws=5000, tune=1000, chains=4,discard_tuned_samples=True, random_seed=84735)
-    pm.compute_log_likelihood(trace_H0)
-
-# 定义备择假设模型（包含截距和斜率的模型）
-with pm.Model() as model_H1:
-    
-    beta_0 = pm.Normal("beta_0", mu=5, sigma=2)        
-    beta_1 = pm.Normal("beta_1", mu=0, sigma=1)      
-    sigma = pm.Exponential("sigma", 3)                    
-    x = pm.MutableData("x", df['Label'])         
-    mu = beta_0 + beta_1 * x
-    likelihood = pm.Normal("y_est", mu=mu, sigma=sigma, observed=df['RT_sec'])  
-    trace_H1 = pm.sample(draws=5000, tune=1000, chains=4,discard_tuned_samples=True, random_seed=84735)
-    pm.compute_log_likelihood(trace_H1)
-    
-
-# 计算贝叶斯因子
-model_compare = az.compare({"Label": trace_H0, "Null model": trace_H1}, method='BB-pseudo-BMA')
-weight_H0 = model_compare.loc["Label", "weight"]
-weight_H1 = model_compare.loc["Null model", "weight"]
-BF_10 = weight_H1 / weight_H0
-#print(f"贝叶斯因子 (BF_10): {BF_10}")
-
-#计算先验概率比
-def calculate_odds(tace_samples, region = [-0.05, 0.05]):
-    
-    # 计算区间 [-0.05, 0.05] 内的样本
-    in_range = tace_samples[(tace_samples >= region[0]) & (tace_samples <= region[1])]
-
-    # 计算区间外的样本
-    out_of_range = tace_samples[(tace_samples < region[0]) | (tace_samples > region[1])]
-
-    # 计算区间内外的比例
-    P_in_range = len(in_range) / len(tace_samples)
-    P_out_of_range = len(out_of_range) / len(tace_samples)
-
-    # 计算比率
-    ratio = P_out_of_range / P_in_range
-    return ratio
-  
-
-prior_samples = trace.prior['beta_1'].values.reshape(-1)
-
-prior_odds = calculate_odds(prior_samples, region=[-0.05, 0.05])
-
-#print(f"先验概率比（prior odds）: {prior_odds:.4f}")
+def fmt(x):
+    if 1e-2 <= abs(x) < 1e6:
+        return f"{x:.2f}"
+    return f"{x:.2e}"
 
 
+# ---------------------------------------------------------------------------
+# 1. Data
+# ---------------------------------------------------------------------------
+
+N, Y = 118, 99
+print(f"N = {N}, Y = {Y}, observed proportion = {Y / N:.3f}")
+
+# ---------------------------------------------------------------------------
+# 2. Beta-Binomial model and posterior sampling
+# ---------------------------------------------------------------------------
+
+with pm.Model() as bb_model:
+    theta = pm.Beta("theta", alpha=2, beta=2)
+    y = pm.Binomial("y", n=N, p=theta, observed=Y)
+    trace = pm.sample(draws=4000, tune=1000, chains=4, cores=4,
+                      random_seed=84735, progressbar=False)
+
+az.summary(trace, var_names=["theta"])
+
+theta_post = trace.posterior["theta"].values.reshape(-1)
+theta_prior = st.beta.rvs(2, 2, size=theta_post.size, random_state=84735)
+
+# ---------------------------------------------------------------------------
+# 3. HDI and ROPE
+# ---------------------------------------------------------------------------
+
+hdi = az.hdi(theta_post, prob=0.95)
+print(f"95% HDI: [{hdi[0]:.2f}, {hdi[1]:.2f}]")
+print(f"Posterior mean: {theta_post.mean():.3f} | median: {np.median(theta_post):.3f}")
+
+inside_rope = (theta_post >= 0.4) & (theta_post <= 0.6)
+p_inside_rope = inside_rope.mean()
+print(f"P(theta in ROPE [0.4, 0.6] | Y) = {p_inside_rope:.2e}")
+
+if hdi[0] > 0.6:
+    print("HDI lies entirely above the ROPE -> theta is practically different from 0.5")
+elif hdi[1] < 0.4:
+    print("HDI lies entirely below the ROPE -> theta is practically different from 0.5")
+elif hdi[0] >= 0.4 and hdi[1] <= 0.6:
+    print("HDI lies entirely inside the ROPE -> theta is practically equivalent to 0.5")
+else:
+    print("HDI overlaps the ROPE -> undecided")
+
+# ---------------------------------------------------------------------------
+# 4. Six framings of hypothesis testing
+# ---------------------------------------------------------------------------
+
+def make_test(samples, name, null_desc, interest_desc, null_spans):
+    in_null = np.zeros_like(samples, dtype=bool)
+    for lo, hi in null_spans:
+        in_null |= (samples >= lo) & (samples <= hi)
+    return {
+        "name": name,
+        "null": null_desc,
+        "interest": interest_desc,
+        "p_null": float(in_null.mean()),
+        "p_interest": float(1 - in_null.mean()),
+        "spans": null_spans,
+    }
 
 
-# 请直接运行，无需修改
-def calculate_odds(tace_samples, region = [-0.05, 0.05]):
-    
-    # 计算区间 [-0.05, 0.05] 内的样本
-    in_range = tace_samples[(tace_samples >= region[0]) & (tace_samples <= region[1])]
+tests = [
+    make_test(theta_post, "ROPE Test (Practical Equivalence)",
+              "θ < 0.4 or θ > 0.6 (outside ROPE)",
+              "0.4 ≤ θ ≤ 0.6 (inside ROPE)",
+              [(-np.inf, 0.4), (0.6, np.inf)]),
+    make_test(theta_post, "One-sided NHST",
+              "θ ≤ 0.5", "θ > 0.5",
+              [(-np.inf, 0.5)]),
+    make_test(theta_post, "Two-sided Minimal Effect Test",
+              "0.4 ≤ θ ≤ 0.6 (trivial effect)",
+              "θ < 0.4 or θ > 0.6 (meaningful effect)",
+              [(0.4, 0.6)]),
+    make_test(theta_post, "One-sided Minimal Effect Test",
+              "θ ≤ 0.6", "θ > 0.6",
+              [(-np.inf, 0.6)]),
+    make_test(theta_post, "Equivalence Test",
+              "θ < 0.4 or θ > 0.6 (outside ROPE)",
+              "0.4 ≤ θ ≤ 0.6 (inside ROPE)",
+              [(-np.inf, 0.4), (0.6, np.inf)]),
+    make_test(theta_post, "Non-inferiority Test",
+              "θ < 0.4", "θ ≥ 0.4",
+              [(-np.inf, 0.4)]),
+]
 
-    # 计算区间外的样本
-    out_of_range = tace_samples[(tace_samples < region[0]) | (tace_samples > region[1])]
+for t in tests:
+    print(f"{t['name']:<36s} p(null) = {t['p_null']:.3f} | p(interest) = {t['p_interest']:.3f}")
 
-    # 计算区间内外的比例
-    P_in_range = len(in_range) / len(tace_samples)
-    P_out_of_range = len(out_of_range) / len(tace_samples)
-
-    # 计算比率
-    ratio = P_out_of_range / P_in_range
-    return ratio
-
-def plot_region(trace_samples, region=[-0.05,0.05], dist_type="Prior", ax=None):
-    
-    if ax is None:
-        ax = plt.gca()
-    
-    kde = sns.kdeplot(trace_samples, color="black", linewidth=2, ax=ax)
-
-    # 获取核密度估计的曲线数据
-    x, y = kde.get_lines()[0].get_data()
-
-    # 高亮 [-0.05, 0.05] 区间的密度
-    ax.fill_between(
-        x, y,
-        where=(x >= region[0]) & (x <= region[1]),
-        color="blue",
-        alpha=0.3,
-        label="Null"
-    )
-
-    # 高亮区间之外（替代区域）
-    ax.fill_between(
-        x, y,
-        where=(x < region[0]) | (x > region[1]),
-        color="yellow",
-        alpha=0.3,
-        label="Alternative"
-    )
-
-    # 图例和标题
-    ax.set_title(f"{dist_type} Distribution with Null Region")
-    ax.set_ylabel("Density")
-    ax.legend(title=f"{dist_type} regions")
-    
-
-#=====================================
-#      基于方向的贝叶斯因子计算
-#      自行练习
-#=====================================
-
-# 获取 beta_1的先验分布的采样
-# beta_1_prior = ...
-
-
-# 获取 beta_1的后验分布的采样
-# beta_1_posterior = ...
-
-
-
-# region = ...
-
-# 计算先验比
-
-# prior_odds = ...
-
-# 计算后验比
-# prior_odds = ...
-
-# 计算贝叶斯因子
-# prior_odds = ...
-
-#print("bayes_factor:", bayes_factor)
-
-本项目来源于和鲸社区，使用转载需要标注来源
-作者: 和鲸社区
-来源: 和鲸社区
-# 最后检查结果，前面部分的代码运行无误后，请直接运行该代码块
-
-# 绘制密度图
-plt.figure(figsize=(8, 5))
-
-# 绘图
-az.plot_kde(beta_1_prior, label="prior", plot_kwargs={"color": "cyan", "alpha": 0.5}, fill_kwargs={"alpha": 0.3})
-
-az.plot_kde(beta_1_posterior, label="posterior", plot_kwargs={"color": "coral", "alpha": 0.6}, fill_kwargs={"alpha": 0.3})
-
-# 添加垂直虚线
-plt.axvline(0, color="grey", linestyle="--", linewidth=1)
-
-# 标注零假设区域
-plt.fill_betweenx([0, 8], -1, 0, color="blue", alpha=0.2) 
-
-plt.xlim(-1,1)
-
-# 设置图例和标签
-plt.legend(title="Distribution", loc="upper right")
-plt.xlabel("beta_1")
-plt.ylabel("Density")
-plt.title("Prior and Posterior Distribution")
-
-sns.despine()
-
+# six panels: blue shading = null region
+fig, axes = plt.subplots(3, 2, figsize=(12, 8), sharex=True)
+for ax, t in zip(axes.ravel(), tests):
+    sns.kdeplot(x=theta_post, fill=True, color="grey", alpha=0.4, linewidth=1, ax=ax)
+    for lo, hi in t["spans"]:
+        ax.axvspan(max(lo, 0), min(hi, 1), color="steelblue", alpha=0.18, linewidth=0)
+    ax.set_xlim(0, 1)
+    ax.set_title(t["name"], fontsize=10, fontweight="bold")
+    ax.set_xlabel("θ")
+    ax.set_ylabel("Posterior density")
+    ax.text(0.02, 0.95,
+            f"Null: {t['null']}\nInterest: {t['interest']}\n"
+            f"p(null) = {t['p_null']:.3f} | p(interest) = {t['p_interest']:.3f}",
+            transform=ax.transAxes, va="top", fontsize=6.5)
+fig.suptitle("Blue shading = null hypothesis region", fontsize=9)
+fig.tight_layout()
 plt.show()
+
+# ---------------------------------------------------------------------------
+# 5. Savage-Dickey density ratio (point null: theta = 0.5)
+# ---------------------------------------------------------------------------
+
+prior_at_null = st.beta.pdf(0.5, 2, 2)
+posterior_at_null = st.beta.pdf(0.5, 101, 21)
+
+BF01 = posterior_at_null / prior_at_null
+BF10 = 1 / BF01
+print(f"BF_10 = {fmt(BF10)} | BF_01 = {fmt(BF01)}")
+
+# ---------------------------------------------------------------------------
+# 6. Prior vs posterior (APA-style figure)
+# ---------------------------------------------------------------------------
+
+fig, ax = plt.subplots(figsize=(8, 4))
+sns.kdeplot(x=theta_prior, fill=True, color="steelblue", alpha=0.5, label="Prior", ax=ax)
+sns.kdeplot(x=theta_post, fill=True, color="darkorange", alpha=0.5, label="Posterior", ax=ax)
+ax.set_xlim(0, 1)
+ax.set_xlabel("θ")
+ax.set_ylabel("Density")
+ax.legend(title="Distribution", loc="upper center", bbox_to_anchor=(0.5, 1.12), ncol=2,
+          frameon=False)
+ax.set_title("Prior and Posterior Distribution Comparison")
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------------------------------------
+# 7. Marginal likelihood and the interval null (ROPE)
+# ---------------------------------------------------------------------------
+
+# H0: theta = 0.5 (point null) -> the marginal likelihood is the likelihood at 0.5
+logml_H0 = st.binom.logpmf(Y, N, 0.5)
+
+# H1: theta ~ Beta(2, 2) -> integrate prior x likelihood over [0, 1]
+# (this is exactly what bridge sampling estimates from posterior draws)
+from scipy.integrate import quad
+marginal_H1 = quad(lambda t: st.beta.pdf(t, 2, 2) * st.binom.pmf(Y, N, t),
+                   0, 1, epsabs=1e-14, limit=200)[0]
+BF01_marginal = np.exp(logml_H0) / marginal_H1
+print(f"[point null]     BF_01 = {fmt(BF01_marginal)} | BF_10 = {fmt(1 / BF01_marginal)}")
+
+# Interval null: H0: theta in [0.4, 0.6], H1: theta outside
+p_rope_post = st.beta.cdf(0.6, 101, 21) - st.beta.cdf(0.4, 101, 21)
+p_rope_prior = st.beta.cdf(0.6, 2, 2) - st.beta.cdf(0.4, 2, 2)
+BF01_rope = (p_rope_post / (1 - p_rope_post)) * ((1 - p_rope_prior) / p_rope_prior)
+print(f"P(theta in ROPE | Y)      = {fmt(p_rope_post)}")
+print(f"P(theta in ROPE) (prior)  = {fmt(p_rope_prior)}")
+print(f"[interval null]  BF_01 = {fmt(BF01_rope)} | BF_10 = {fmt(1 / BF01_rope)}")
+
+# ---------------------------------------------------------------------------
+# 8. Exercise: directional hypothesis (fill in the blanks)
+# ---------------------------------------------------------------------------
+
+# H1: theta > 0.5. Reuse the helper logic above:
+#   region = (-inf, 0.5)
+#   prior_odds = ...
+#   posterior_odds = ...
+#   BF_10 = posterior_odds / prior_odds
+#
+# Hint: the prior for H1 is P(theta > 0.5) under Beta(2, 2),
+#       the posterior one uses Beta(101, 21).

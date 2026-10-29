@@ -44,8 +44,8 @@ Email: hcp4715@hotmail.com
 |  5   |          Approximating the Posterior           |
 |  6   |              MCMC under the Hood               |
 |  7   |        Posterior Inference & Prediction        |
-|  8   |           A Simple Normal Regression           |
-|  9   |                  Bayes factors                 |
+|  8   |      Hypothesis Testing & Bayes Factors        |
+|  9   |  A Simple Linear Regression Model with brms    |
 |  10  |              Multiple regression               |
 |  11  |         Evaluating Regression Models           |
 |  12  |            GLM: Logistic Regression            |
